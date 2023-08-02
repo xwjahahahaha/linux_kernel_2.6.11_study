@@ -1,4 +1,4 @@
-Linux-2.6.11
+linux_kernel_2.6.11_study
 ============
 
-My notes in Linux-2.6.11 according  to the book Understanding The Linux Kernel
+《深入理解linux内核》书籍对应源码学习，主要是一些注释记录
