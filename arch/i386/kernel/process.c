@@ -284,33 +284,39 @@ extern void kernel_thread_helper(void);
 __asm__(".section .text\n"
 	".align 4\n"
 	"kernel_thread_helper:\n\t"
-	"movl %edx,%eax\n\t"
-	"pushl %edx\n\t"
-	"call *%ebx\n\t"
-	"pushl %eax\n\t"
-	"call do_exit\n"
+	"movl %edx,%eax\n\t"	// 复制一份edx的值到eax
+	"pushl %edx\n\t"		// 压入args入栈，在接下来的函数执行中会pop使用
+	"call *%ebx\n\t"		// 执行fn(地址存放在ebx中)，函数执行之后的返回值会放入eax
+	"pushl %eax\n\t"		// 将上一步函数返回值压入eax，让其返回值作为do_exit的参数
+	"call do_exit\n"		// 执行退出
 	".previous");
 
 /*
  * Create a kernel thread
+ * args:
+ * 	fn: 内核线程执行的函数
+ * 	arg: 函数的参数
+ * 	flags: 一组clone标志
  */
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
-	struct pt_regs regs;
+	struct pt_regs regs;				// 寄存器结构体，用此初始化新内核线程的CPU寄存器
 
 	memset(&regs, 0, sizeof(regs));
 
-	regs.ebx = (unsigned long) fn;
+	// 借助于do_fork的copy_process函数，将这些寄存器的值初始化新内核线程的CPU寄存器
+	regs.ebx = (unsigned long) fn;		// 分别将内核函数地址fn、以及函数的参数放入寄存器
 	regs.edx = (unsigned long) arg;
 
 	regs.xds = __USER_DS;
 	regs.xes = __USER_DS;
 	regs.orig_eax = -1;
-	regs.eip = (unsigned long) kernel_thread_helper;
+	regs.eip = (unsigned long) kernel_thread_helper;	// 让eip下一条指令执行这个helper汇编函数，总体作用就是运行ebc的函数fn(arg)并返回
 	regs.xcs = __KERNEL_CS;
 	regs.eflags = X86_EFLAGS_IF | X86_EFLAGS_SF | X86_EFLAGS_PF | 0x2;
 
 	/* Ok, create the new process.. */
+	// CLONE_VM避免复制调用进程的页表，CLONE_UNTRACED用于禁止追踪内核进程
 	return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
 }
 

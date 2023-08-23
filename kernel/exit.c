@@ -39,17 +39,17 @@ int getrusage(struct task_struct *, int, struct rusage __user *);
 
 static void __unhash_process(struct task_struct *p)
 {
-	nr_threads--;
-	detach_pid(p, PIDTYPE_PID);
-	detach_pid(p, PIDTYPE_TGID);
-	if (thread_group_leader(p)) {
-		detach_pid(p, PIDTYPE_PGID);
+	nr_threads--;					// 线程组计数器-1						
+	detach_pid(p, PIDTYPE_PID);		
+	detach_pid(p, PIDTYPE_TGID);	// 分别从PIDTYPE_PID和PIDTYPE_TGID类型的PID散列表中删除进程描述符
+	if (thread_group_leader(p)) {	// 如果该进程是线程组的领头进程，那么也很有可能是进程组的领头进程（即使不是的话也没关系，detach_pid会什么也不做）
+		detach_pid(p, PIDTYPE_PGID);	// 那么再从PIDTYPE_PGID和PIDTYPE_SID中删除其进程描述符
 		detach_pid(p, PIDTYPE_SID);
 		if (p->pid)
 			__get_cpu_var(process_counts)--;
 	}
 
-	REMOVE_LINKS(p);
+	REMOVE_LINKS(p);				// 从进程链表中删除该进程描述符的链接
 }
 
 void release_task(struct task_struct * p)
@@ -59,21 +59,23 @@ void release_task(struct task_struct * p)
 	struct dentry *proc_dentry;
 
 repeat: 
-	atomic_dec(&p->user->processes);
+	atomic_dec(&p->user->processes);		// 递减当前用户拥有的进程个数
 	spin_lock(&p->proc_lock);
 	proc_dentry = proc_pid_unhash(p);
 	write_lock_irq(&tasklist_lock);
 	if (unlikely(p->ptrace))
-		__ptrace_unlink(p);
+		__ptrace_unlink(p);					// 如果进程正在被追踪，那么解除追踪，让其重新属于初始父进程
 	BUG_ON(!list_empty(&p->ptrace_list) || !list_empty(&p->ptrace_children));
-	__exit_signal(p);
-	__exit_sighand(p);
-	__unhash_process(p);
+	__exit_signal(p);						// 删除所有挂起信号并释放进程的signal_struct描述符
+	__exit_sighand(p);						// 删除进程的信号处理函数
+	__unhash_process(p);					// 对进程的pid hash做一系列处理
 
 	/*
 	 * If we are the last non-leader member of the thread
 	 * group, and the leader is zombie, then notify the
 	 * group leader's parent process. (if it wants notification.)
+	 * 如果线程组的最后一个成员不是领头进程并且此时领头进程是一个僵尸进程，那么
+	 * 向领头进程的父进程发送一个信号，通知其自己已死亡
 	 */
 	zap_leader = 0;
 	leader = p->group_leader;
@@ -84,21 +86,24 @@ repeat:
 		 * If we were the last child thread and the leader has
 		 * exited already, and the leader's parent ignores SIGCHLD,
 		 * then we are the one who should release the leader.
-		 *
+		 *	
 		 * do_notify_parent() will have marked it self-reaping in
 		 * that case.
+		 * 如果当前线程是线程组中的最后一个子线程，并且领导线程已经退出，
+		 * 同时领导线程的父进程忽略了 SIGCHLD 信号（领导线程的exit_signal设置为-1），
+		 * 那么当前线程应该负责释放领导线程
 		 */
-		zap_leader = (leader->exit_signal == -1);
+		zap_leader = (leader->exit_signal == -1);	// zap_leader是清除领导线程的bool判断值
 	}
 
-	sched_exit(p);
+	sched_exit(p);			// 调整父进程的时间片
 	write_unlock_irq(&tasklist_lock);
 	spin_unlock(&p->proc_lock);
 	proc_pid_flush(proc_dentry);
 	release_thread(p);
-	put_task_struct(p);
+	put_task_struct(p);		// 递减进程描述符的使用计数器
 
-	p = leader;
+	p = leader;				// 对应上面的特殊情况，如果zap_leader为正，则清除父进程
 	if (unlikely(zap_leader))
 		goto repeat;
 }
@@ -590,10 +595,14 @@ static inline void forget_original_parent(struct task_struct * father,
 	struct task_struct *p, *reaper = father;
 	struct list_head *_p, *_n;
 
+	// reaper 进程负责等待并回收已终止子进程的资源。
+	// 这里循环的目标是找到一个合适的reaper进程。
 	do {
 		reaper = next_thread(reaper);
-		if (reaper == father) {
-			reaper = child_reaper;
+		if (reaper == father) {		// 如果遍历回到father
+		// 那么就设置为child_reaper，这个特定的标识父进程的reaper进程
+		// （如果父进程也没有reaper进程，那么其值就是父进程本身）
+			reaper = child_reaper;	
 			break;
 		}
 	} while (reaper->exit_state);
@@ -653,8 +662,9 @@ static void exit_notify(struct task_struct *tsk)
 	struct task_struct *t;
 	struct list_head ptrace_dead, *_p, *_n;
 
-	if (signal_pending(tsk) && !(tsk->signal->flags & SIGNAL_GROUP_EXIT)
+	if (signal_pending(tsk) && !(tsk->signal->flags & SIGNAL_GROUP_EXIT) // signal_pending的作用是检查线程是否还有其他未处理的信号
 	    && !thread_group_empty(tsk)) {
+		// 条件：确保当前的进程或线程有待处理的信号，但是整个线程组没有在退出，并且线程组中还有其他线程
 		/*
 		 * This occurs when there was a race between our exit
 		 * syscall and a group signal choosing us as the one to
@@ -663,14 +673,15 @@ static void exit_notify(struct task_struct *tsk)
 		 * should be woken now to take the signal since we will not.
 		 * Now we'll wake all the threads in the group just to make
 		 * sure someone gets all the pending signals.
+		 * 处理一种情况：当前线程current被唤醒处理另一组线程组的信号，但是目前它在退出，所以需要唤醒同组的另一个线程来执行
 		 */
 		read_lock(&tasklist_lock);
 		spin_lock_irq(&tsk->sighand->siglock);
-		for (t = next_thread(tsk); t != tsk; t = next_thread(t))
-			if (!signal_pending(t) && !(t->flags & PF_EXITING)) {
-				recalc_sigpending_tsk(t);
+		for (t = next_thread(tsk); t != tsk; t = next_thread(t))	// 遍历同线程组(tgid)的进程
+			if (!signal_pending(t) && !(t->flags & PF_EXITING)) {	// 当某个同组线程没有未处理的信号并且不在退出时
+				recalc_sigpending_tsk(t);							// 重新计算一次该线程的待处理信号
 				if (signal_pending(t))
-					signal_wake_up(t, 0);
+					signal_wake_up(t, 0);							// 满足条件，唤醒其处理
 			}
 		spin_unlock_irq(&tsk->sighand->siglock);
 		read_unlock(&tasklist_lock);
@@ -681,14 +692,17 @@ static void exit_notify(struct task_struct *tsk)
 	/*
 	 * This does two things:
 	 *
-  	 * A.  Make init inherit all the child processes
+  	 * A.  Make init inherit all the child processes init 
 	 * B.  Check to see if any process groups have become orphaned
 	 *	as a result of our exiting, and if they have any stopped
 	 *	jobs, send them a SIGHUP and then a SIGCONT.  (POSIX 3.2.2.2)
+	 *	A.进程init继承所有子进程
+	 *  B.检查是否有任何进程组由于我们的退出而变得孤立，如果它们有任何停止的作业，
+	 *   请向它们发送 SIGHUP，然后发送 SIGCONT
 	 */
 
 	INIT_LIST_HEAD(&ptrace_dead);
-	forget_original_parent(tsk, &ptrace_dead);
+	forget_original_parent(tsk, &ptrace_dead);	// 转交自己所有孩子进程给同组的其他进程，如果没有的话那么转交给init进程
 	BUG_ON(!list_empty(&tsk->children));
 	BUG_ON(!list_empty(&tsk->ptrace_children));
 
@@ -696,10 +710,15 @@ static void exit_notify(struct task_struct *tsk)
 	 * Check to see if any process groups have become orphaned
 	 * as a result of our exiting, and if they have any stopped
 	 * jobs, send them a SIGHUP and then a SIGCONT.  (POSIX 3.2.2.2)
+	 * 当一个进程组中的所有进程的父进程都不在该进程组时，这个进程组被认为是孤立的。
+	 * 这是一个特殊的情况，因为当一个进程组变成孤立并且其中有被停止的进程时，
+	 * 该孤立进程组应该接收到SIGHUP信号，随后接收到SIGCONT信号。
+	 * 这是按照POSIX规范来确保没有进程被遗留在停止状态。
 	 *
 	 * Case i: Our father is in a different pgrp than we are
 	 * and we were the only connection outside, so our pgrp
 	 * is about to become orphaned.
+	 * 特殊情况：父进程与我们不属于同一个进程组，我们是外部的唯一链接，因此我们的进程组将成为孤儿
 	 */
 	 
 	t = tsk->real_parent;
@@ -708,8 +727,8 @@ static void exit_notify(struct task_struct *tsk)
 	    (t->signal->session == tsk->signal->session) &&
 	    will_become_orphaned_pgrp(process_group(tsk), tsk) &&
 	    has_stopped_jobs(process_group(tsk))) {
-		__kill_pg_info(SIGHUP, (void *)1, process_group(tsk));
-		__kill_pg_info(SIGCONT, (void *)1, process_group(tsk));
+		__kill_pg_info(SIGHUP, (void *)1, process_group(tsk));		// 先发送SIGHUP，作用是通知进程组中的进程，其状态即将变化（父进程已退出，将变成孤儿）
+		__kill_pg_info(SIGCONT, (void *)1, process_group(tsk));		// 再发送SIGCONT，作用是让暂停的进程继续执行，知道自己的状态变化
 	}
 
 	/* Let father know we died 
@@ -725,33 +744,37 @@ static void exit_notify(struct task_struct *tsk)
 	 * If our self_exec id doesn't match our parent_exec_id then
 	 * we have changed execution domain as these two values started
 	 * the same after a fork.
-	 *	
+	 *
+	 * 确保在发送死亡信号给父进程时，要考虑子进程或父进程可能发生的安全域和执行域的变化。
+	 * 如果这些域在子进程创建之后发生了变化，那么直接发送信号可能会导致安全问题。
+	 * 为了防止这种情况，需要进行相应的检查。
 	 */
 	
 	if (tsk->exit_signal != SIGCHLD && tsk->exit_signal != -1 &&
 	    ( tsk->parent_exec_id != t->self_exec_id  ||
 	      tsk->self_exec_id != tsk->parent_exec_id)
-	    && !capable(CAP_KILL))
-		tsk->exit_signal = SIGCHLD;
+	    && !capable(CAP_KILL))				// 如果子进程的执行域发生了改变，我们希望只发送安全的信号，也就是SIGCHLD
+		tsk->exit_signal = SIGCHLD;			// 子进程(当前进程)的exit_signal就代表了传递给父进程的退出信号
 
 
 	/* If something other than our normal parent is ptracing us, then
 	 * send it a SIGCHLD instead of honoring exit_signal.  exit_signal
 	 * only has special meaning to our real parent.
+	 * 如果还有正常父进程之外的追踪进程在跟踪我们，那么向其发送一个SIGCHLD信号（exit_signal是父子进程特有的发送信号的方式，对其不适用）
 	 */
 	if (tsk->exit_signal != -1 && thread_group_empty(tsk)) {
 		int signal = tsk->parent == tsk->real_parent ? tsk->exit_signal : SIGCHLD;
-		do_notify_parent(tsk, signal);
+		do_notify_parent(tsk, signal);	// 这里的parent是调试程序
 	} else if (tsk->ptrace) {
 		do_notify_parent(tsk, SIGCHLD);
 	}
 
-	state = EXIT_ZOMBIE;
+	state = EXIT_ZOMBIE;			// 设置退出默认状态为EXIT_ZOMBIE
 	if (tsk->exit_signal == -1 &&
-	    (likely(tsk->ptrace == 0) ||
+	    (likely(tsk->ptrace == 0) ||		// 如果当前进程(子进程)的exit_signal仍然为-1并且没有被追踪
 	     unlikely(tsk->parent->signal->flags & SIGNAL_GROUP_EXIT)))
-		state = EXIT_DEAD;
-	tsk->exit_state = state;
+		state = EXIT_DEAD;					// 那么就设置其退出状态为正常的EXIT_DEAD
+	tsk->exit_state = state;		// 否则可能就是默认的EXIT_ZOMBIE，成为僵尸进程
 
 	/*
 	 * Clear these here so that update_process_times() won't try to deliver
@@ -770,14 +793,15 @@ static void exit_notify(struct task_struct *tsk)
 
 	/* If the process is dead, release it - nobody will wait for it */
 	if (state == EXIT_DEAD)
-		release_task(tsk);
+		release_task(tsk);		// 释放已经死亡进程的其他数据结构占用的内存
 
 	/* PF_DEAD causes final put_task_struct after we schedule. */
 	preempt_disable();
-	tsk->flags |= PF_DEAD;
+	tsk->flags |= PF_DEAD;		// 设置进程的flag为PF_DEAD
 }
 
-fastcall NORET_TYPE void do_exit(long code)
+// fastcall使用寄存器获取函数参数, NORET_TYPE表示函数不返回给调用者（可能会长调用）
+fastcall NORET_TYPE void do_exit(long code) 
 {
 	struct task_struct *tsk = current;
 	int group_dead;
@@ -798,8 +822,8 @@ fastcall NORET_TYPE void do_exit(long code)
 		ptrace_notify((PTRACE_EVENT_EXIT << 8) | SIGTRAP);
 	}
 
-	tsk->flags |= PF_EXITING;
-	del_timer_sync(&tsk->real_timer);
+	tsk->flags |= PF_EXITING;		// 将进程的flag字段设置为PF_EXITING，表示正在被删除
+	del_timer_sync(&tsk->real_timer);	// 从动态定时器队列中删除进程描述符
 
 	if (unlikely(in_atomic()))
 		printk(KERN_INFO "note: %s[%d] exited with preempt_count %d\n",
@@ -811,8 +835,8 @@ fastcall NORET_TYPE void do_exit(long code)
 	group_dead = atomic_dec_and_test(&tsk->signal->live);
 	if (group_dead)
 		acct_process(code);
-	exit_mm(tsk);
-
+	exit_mm(tsk);		
+	// 这些exit函数都是分离进程描述符的部分数据结构，如果这些单独的结构没有共享，那么就直接删除
 	exit_sem(tsk);
 	__exit_files(tsk);
 	__exit_fs(tsk);
@@ -827,15 +851,15 @@ fastcall NORET_TYPE void do_exit(long code)
 	if (tsk->binfmt)
 		module_put(tsk->binfmt->module);
 
-	tsk->exit_code = code;
-	exit_notify(tsk);
+	tsk->exit_code = code;		// 设置进程的终止代号为进程描述符的exit_code字段（这个值要么是exit/exit_group系统调用的正常代号要么是内核的异常终止错误代号）
+	exit_notify(tsk);			// 向所有亲属进程发送通告，自己（当前进程）要结束了
 #ifdef CONFIG_NUMA
 	mpol_free(tsk->mempolicy);
 	tsk->mempolicy = NULL;
 #endif
 
 	BUG_ON(!(current->flags & PF_DEAD));
-	schedule();
+	schedule();			// 选择一个新的进程运行，当前进程被设置成EXIT_ZOMBIE状态，在调度程序中不会再被调度执行(switch_to宏调用后停止)
 	BUG();
 	/* Avoid "noreturn function does return".  */
 	for (;;) ;
@@ -868,30 +892,30 @@ EXPORT_SYMBOL(next_thread);
  * as well as by sys_exit_group (below).
  */
 NORET_TYPE void
-do_group_exit(int exit_code)
+do_group_exit(int exit_code)  				// exit_code进程的终止代号
 {
 	BUG_ON(exit_code & 0x80); /* core dumps don't get here */
 
-	if (current->signal->flags & SIGNAL_GROUP_EXIT)
-		exit_code = current->signal->group_exit_code;
+	if (current->signal->flags & SIGNAL_GROUP_EXIT)		
+		exit_code = current->signal->group_exit_code;	
 	else if (!thread_group_empty(current)) {
 		struct signal_struct *const sig = current->signal;
 		struct sighand_struct *const sighand = current->sighand;
 		read_lock(&tasklist_lock);
 		spin_lock_irq(&sighand->siglock);
-		if (sig->flags & SIGNAL_GROUP_EXIT)
-			/* Another thread got here before we took the lock.  */
-			exit_code = sig->group_exit_code;
-		else {
-			sig->flags = SIGNAL_GROUP_EXIT;
-			sig->group_exit_code = exit_code;
-			zap_other_threads(current);
+		if (sig->flags & SIGNAL_GROUP_EXIT)  	// 当前进程的退出标志不为0，表示当前内核已经在为当前进程组执行退出了
+			/* Another thread got here before we took the lock.  SIGNAL_GROUP_EXIT标志的作用是同步 */ 
+			exit_code = sig->group_exit_code;	// 赋值/更新终止代号（把已经执行的退出码复制过来）
+		else {									
+			sig->flags = SIGNAL_GROUP_EXIT;		// 否则设置进程的SIGNAL_GROUP_EXIT标志（当前是第一次执行）
+			sig->group_exit_code = exit_code;	// 并设置终止代号到当前进程字段
+			zap_other_threads(current);			// 杀死其他进程
 		}
 		spin_unlock_irq(&sighand->siglock);
 		read_unlock(&tasklist_lock);
 	}
 
-	do_exit(exit_code);
+	do_exit(exit_code);							// 接下来传递exit_code执行do_exit
 	/* NOTREACHED */
 }
 

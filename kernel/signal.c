@@ -1081,9 +1081,10 @@ void zap_other_threads(struct task_struct *p)
 	p->signal->flags = SIGNAL_GROUP_EXIT;
 	p->signal->group_stop_count = 0;
 
-	if (thread_group_empty(p))
+	if (thread_group_empty(p))	// 其他进程集合为空就不执行了
 		return;
 
+	// 遍历与当前tgid对应散列表的每个PID列表
 	for (t = next_thread(p); t != p; t = next_thread(t)) {
 		/*
 		 * Don't bother with already dead threads
@@ -1102,7 +1103,7 @@ void zap_other_threads(struct task_struct *p)
 		if (t != p->group_leader)
 			t->exit_signal = -1;
 
-		sigaddset(&t->pending.signal, SIGKILL);
+		sigaddset(&t->pending.signal, SIGKILL);		// 发送SIGKILL信号，这样所有进程都会执行do_exit函数被杀死
 		rm_from_queue(SIG_KERNEL_STOP_MASK, &t->pending);
 		signal_wake_up(t, 1);
 	}

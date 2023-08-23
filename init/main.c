@@ -371,11 +371,11 @@ static void __init smp_init(void)
 static void noinline rest_init(void)
 	__releases(kernel_lock)
 {
-	kernel_thread(init, NULL, CLONE_FS | CLONE_SIGHAND);
+	kernel_thread(init, NULL, CLONE_FS | CLONE_SIGHAND);	// 创建另一个进程为1的线程(init进程)
 	numa_default_policy();
 	unlock_kernel();
 	preempt_enable_no_resched();
-	cpu_idle();
+	cpu_idle();			// 让进程0循环空闲等待，让系统其他部分继续初始化
 } 
 
 /* Check for early params. */
@@ -410,16 +410,18 @@ void __init parse_early_param(void)
 }
 
 /*
- *	Activate the first processor.
+ *	Activate the first processor. 
+ * 	激活0号进程（所有进程的祖先进程，idle进程orswapper进程）
  */
 
-asmlinkage void __init start_kernel(void)
+asmlinkage void __init start_kernel(void)  // asmlinkage宏的作用是表明函数的所有参数来自堆栈而不是寄存器
 {
 	char * command_line;
 	extern struct kernel_param __start___param[], __stop___param[];
 /*
  * Interrupts are still disabled. Do necessary setups, then
  * enable them
+ * 在设置完一些必要的设置后再开启中断
  */
 	lock_kernel();
 	page_address_init();
@@ -437,11 +439,13 @@ asmlinkage void __init start_kernel(void)
 	 * Set up the scheduler prior starting any interrupts (such as the
 	 * timer interrupt). Full topology setup happens at smp_init()
 	 * time - but meanwhile we still have a functioning scheduler.
+	 * 在中断开启前先设置调度器
 	 */
-	sched_init();
+	sched_init();			// 调度初始化
 	/*
 	 * Disable preemption - early bootup scheduling is extremely
 	 * fragile until we cpu_idle() for the first time.
+	 * 禁止抢占，第一次调用cpu_idle之前，早期的cpu调度非常脆弱
 	 */
 	preempt_disable();
 	build_all_zonelists();
@@ -452,7 +456,7 @@ asmlinkage void __init start_kernel(void)
 		   __stop___param - __start___param,
 		   &unknown_bootoption);
 	sort_main_extable();
-	trap_init();
+	trap_init();			// 开始各种初始化
 	rcu_init();
 	init_IRQ();
 	pidhash_init();
@@ -511,7 +515,8 @@ asmlinkage void __init start_kernel(void)
 	acpi_early_init(); /* before LAPIC and SMP init */
 
 	/* Do the rest non-__init'ed, we're now alive */
-	rest_init();
+	// 处理那些剩下的、不需要被标记为xxx__init的函数
+	rest_init();	
 }
 
 static int __initdata initcall_debug;
@@ -687,6 +692,8 @@ static int init(void * unused)
 	if (execute_command)
 		run_init_process(execute_command);
 
+	// 尝试按顺序执行以下的init程序，如果上一个成功则execve直接开始执行该代码，而不会继续向下执行
+	// 所以会按序逐个尝试，直到有一个成功
 	run_init_process("/sbin/init");
 	run_init_process("/etc/init");
 	run_init_process("/bin/init");

@@ -375,13 +375,13 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long rsp,
 
 	*childregs = *regs;
 
-	childregs->rax = 0;
-	childregs->rsp = rsp;
+	childregs->rax = 0;						// rax寄存器设置为0，让子进程返回值为0（因为(新)子进程开始运行的时候，eax/rax就是其返回值的地方）
+	childregs->rsp = rsp;					// 设置rsp
 	if (rsp == ~0UL) {
 		childregs->rsp = (unsigned long)childregs;
 	}
 
-	p->thread.rsp = (unsigned long) childregs;
+	p->thread.rsp = (unsigned long) childregs;	// 设置rsp为子进程内核栈的基地址
 	p->thread.rsp0 = (unsigned long) (childregs+1);
 	p->thread.userrsp = me->thread.userrsp; 
 

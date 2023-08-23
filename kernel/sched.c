@@ -1226,8 +1226,8 @@ void fastcall wake_up_new_task(task_t * p, unsigned long clone_flags)
 
 	p->prio = effective_prio(p);
 
-	if (likely(cpu == this_cpu)) {
-		if (!(clone_flags & CLONE_VM)) {
+	if (likely(cpu == this_cpu)) {  			// 如果父进程与子进程在同一个cpu上
+		if (!(clone_flags & CLONE_VM)) {		// 并且不共享一个页表
 			/*
 			 * The VM isn't cloned, so we're in a good position to
 			 * do child-runs-first in anticipation of an exec. This
@@ -1236,16 +1236,18 @@ void fastcall wake_up_new_task(task_t * p, unsigned long clone_flags)
 			if (unlikely(!current->array))
 				__activate_task(p, rq);
 			else {
+				// 将子进程插入到父进程运行队列
+				// 将子进程刚好插入在父进程前面，让子进程先运行
 				p->prio = current->prio;
-				list_add_tail(&p->run_list, &current->run_list);
-				p->array = current->array;
-				p->array->nr_active++;
-				rq->nr_running++;
+				list_add_tail(&p->run_list, &current->run_list); // 把子进程p节点插入到父进程节点之前（run_list是一个链表节点）
+				p->array = current->array;						// array字段是一个指向prio_array_t(优先队列)的指针，这里是父子进程指向一个
+				p->array->nr_active++;							// 进程描述符计数器+1
+				rq->nr_running++;								// 增加调度队列（runqueue，rq）中运行状态进程的数量
 			}
 			set_need_resched();
-		} else
+		} else									// 子进程创建新的地址空间，不共享一组页表
 			/* Run child last */
-			__activate_task(p, rq);
+			__activate_task(p, rq);				// 那么就让子进程最后运行（插入父进程运行队列队尾）
 		/*
 		 * We skip the following code due to cpu == this_cpu
 	 	 *
@@ -1253,7 +1255,7 @@ void fastcall wake_up_new_task(task_t * p, unsigned long clone_flags)
 		 *   this_rq = task_rq_lock(current, &flags);
 		 */
 		this_rq = rq;
-	} else {
+	} else {									// 父子进程不在同一个cpu上
 		this_rq = cpu_rq(this_cpu);
 
 		/*
@@ -1262,7 +1264,7 @@ void fastcall wake_up_new_task(task_t * p, unsigned long clone_flags)
 		 */
 		p->timestamp = (p->timestamp - this_rq->timestamp_last_tick)
 					+ rq->timestamp_last_tick;
-		__activate_task(p, rq);
+		__activate_task(p, rq);					// 父子进程不在同一个cpu上
 		if (TASK_PREEMPTS_CURR(p, rq))
 			resched_task(rq->curr);
 
